@@ -627,17 +627,29 @@ Mealy 版关键改动:去掉 S4,把输出写成 `assign det = (cs == S3) && (din
 ## 5.5 信号上升沿检测 / 打一拍输出(用 reg)
 **(a) 上升沿检测**(a 从 0→1 输出一拍脉冲):
 ```systemverilog
-logic a_d;
-always_ff @(posedge clk or negedge rst_n)
-  if (!rst_n) a_d <= 1'b0;
-  else        a_d <= a;
-assign a_pulse = a & ~a_d;                  // 当前=1 且 上一拍=0
-```
-**(b) 打一拍寄存**(组合信号采样后输出对齐):
-```systemverilog
-always_ff @(posedge clk or negedge rst_n)
-  if (!rst_n) a_q <= 1'b0;
-  else        a_q <= a;
+module edge_det(
+    input clk            ,
+    input rstn           ,
+    input signal         ,
+    output signal_edge
+);
+ 
+reg reg1,reg2;
+ 
+always @(posedge clk or negedge rstn)begin
+    if(!rstn)begin
+        reg1 <= 1'b0;
+        reg2 <= 1'b0;
+    end
+    else begin
+        reg1 <= signal;
+        reg2 <= reg1;
+    end
+end
+ 
+assign signal_edge = (~reg2) & reg1;
+ 
+endmodule
 ```
 讲法:"检测拉高(上升沿)用 reg 存上一拍,`a & ~a_prev` 就是脉冲;只打拍寄存直接 `a_q <= a`。用 `always_ff` 是为同步、消毛刺、时序对齐。"
 
@@ -663,23 +675,116 @@ endmodule
 
 * **为什么不能直接用异步复位？**
 * 异步复位的撤销（Recovery/Removal）是随时发生的。如果撤销时刻刚好撞上时钟上升沿，触发器内部电路无法确定是采样旧值还是复位值，会导致 **亚稳态（Metastability）**。
-
-
 * **电路结构与代码**：
 * 使用两级 D 触发器（2-DFF Synchronizer），复位端接入外部异步复位信号 `rst_n`，输入端接死 `1'b1`。
 
 
 ```systemverilog
 // 异步复位，同步释放电路
-always_ff @(posedge clk or negedge async_rst_n) begin
-    if (!async_rst_n) begin
-        sync_rst_n_stage1 <= 1'b0;
-        sync_rst_n        <= 1'b0;
-    end else begin
-        sync_rst_n_stage1 <= 1 meb1;
-        sync_rst_n        <= sync_rst_n_stage1; // 同步释放后的复位信号
+module asyn_rstn_syn_re(
+    input      clk      ,
+    input      rstn     ,
+    output reg rstn_out
+);
+ 
+reg rstn_1;
+ 
+always @(posedge clk or negedge rstn)begin
+    if(!rstn)begin
+        rstn_1   <= 1'b0;
+        rstn_out <= 1'b0;
+    end
+    else begin
+        rstn_1   <= rstn;
+        rstn_out <= rstn_1;
     end
 end
+ 
+endmodule
+
+
+### 5.8 偶数分频器
+
+module div8(
+  input clk,
+  input rstn,
+  output reg clk_out
+);
+
+parameter number = 8;
+reg [2:0] cnt;
+always @(posedge clk or negedge rstn)begin
+  if (!rstn) begin
+    clk_out <= 1'b0;
+    cnt <= 3'b0;
+  end else if (cnt == number/2-1) begin
+    clk_out <= !clk_out;
+    cnt =<= 3'b0;
+  end else begin
+    cnt <= cnt+1;
+  end
+end
+endmodule
+
+奇数分频器 （与操作）
+module odo_div_and
+   #( parameter DIV_CLK = 9 )
+   (
+    input               rstn ,
+    input               clk,
+    output              clk_div9
+    );
+
+   //计数器
+   reg [3:0]            cnt ;
+   always @(posedge clk or negedge rstn) begin
+      if (!rstn) begin
+         cnt    <= 'b0 ;
+      end
+      else if (cnt == DIV_CLK-1) begin
+         cnt    <= 'b0 ;
+      end
+      else begin
+         cnt    <= cnt + 1'b1 ;
+      end
+   end
+
+   //在上升沿产生9分频
+   reg                  clkp_div9_r ;
+   always @(posedge clk or negedge rstn) begin
+      if (!rstn) begin
+         clkp_div9_r <= 1'b0 ;
+      end
+      else if (cnt == (DIV_CLK>>1) ) begin //计数5-8位低电平
+        clkp_div9_r <= 0 ;
+      end
+      else if (cnt == DIV_CLK-1) begin //计数 0-4 为高电平
+        clkp_div9_r <= 1 ;
+      end
+   end
+
+   //在下降沿产生9分频
+   reg                  clkn_div9_r ;
+   always @(negedge clk or negedge rstn) begin
+      if (!rstn) begin
+         clkn_div9_r <= 1'b0 ;
+      end
+      else if (cnt == (DIV_CLK>>1) ) begin 
+        clkn_div9_r <= 0 ;
+      end
+      else if (cnt == DIV_CLK-1) begin 
+        clkn_div9_r <= 1 ;
+      end
+   end
+
+   //与操作，往往使用基本逻辑单元库
+   assign clk_div9 = clkp_div9_r & clkn_div9_r ;
+
+endmodule
+
+
+
+
 
 ```
 

@@ -609,6 +609,29 @@ module seq_det_1010 (
 endmodule
 ```
 
+
+用移位寄存器实现
+```systemverilog
+module shift_reg_seq_det(
+  input clk,
+  input rstn,
+  input din,
+  input det
+);
+reg [3:0] data;
+parameter sequence_det = 4'b1010;
+
+always @(posedge clk or negedge rstn) begin
+  if (!rstn) begin
+    data <= 4'b0000;
+  end else begin
+    data <= {data[2:0], din};
+  end
+end
+
+assign det = (data == sequence_det) ? 1'b1 : 1'b0;
+
+```
 ### Moore vs Mealy(可能被追问)
 
 | | Moore(上面这版) | Mealy |
@@ -671,7 +694,7 @@ endmodule
 - **位运算**:最低位 1 的 one-hot = `x & (-x)`;清最低位 1 = `x & (x-1)`。
 - 讲法:"本质是 priority encoder。找最低位从高往低扫,找最高位反着扫;也可用 `x & -x` 取最低位 1 的 one-hot 再编码。"
 
-### 5.7 异步复位，同步释放（Asynchronous Reset, Synchronous Release）
+## 5.7 异步复位，同步释放（Asynchronous Reset, Synchronous Release）
 
 * **为什么不能直接用异步复位？**
 * 异步复位的撤销（Recovery/Removal）是随时发生的。如果撤销时刻刚好撞上时钟上升沿，触发器内部电路无法确定是采样旧值还是复位值，会导致 **亚稳态（Metastability）**。
@@ -701,10 +724,12 @@ always @(posedge clk or negedge rstn)begin
 end
  
 endmodule
+```
+* **一句话口诀**：“**复位生效异步（响应快、不依赖时钟），复位撤销同步（过两级 FF，避开 Recovery/Removal 违例）**。”
 
 
-### 5.8 偶数分频器
-
+## 5.8 奇偶分频器
+```systemverilog
 module div8(
   input clk,
   input rstn,
@@ -781,15 +806,78 @@ module odo_div_and
    assign clk_div9 = clkp_div9_r & clkn_div9_r ;
 
 endmodule
-
-
-
-
-
 ```
 
+## 5.9 平头哥面试手撕代码（移位状态机序列检测）
+```systemverilog
+module T_head#(
+  parameter IDLE=4'b0001,RES_0=4'b0010,RES_1=4'b0100,RES_2=4'b1000
+)(
+  input         clk       ,
+  input         rstn      ,
+ 
+  input         data_in   ,
+  output   reg  data_out  
+);
+// 第一段：状态转移 
+// FSM state 
+reg [3:0] next_state    ;
+reg [3:0] current_state ;
+ 
+//(1) state transfer
+always @(posedge clk)begin
+  if(!rstn)begin
+    current_state <= IDLE;
+  end
+  else begin
+    current_state <= next_state;
+  end
+end
+ 
+//(2) determine the next state according to the current state
+ 
+always @(*)begin
+  next_state = current_state;
+  case(current_state)
+      IDLE:
+          case(data_in)
+              1'b0: next_state = RES_0;
+              1'b1: next_state = RES_1;
+          endcase
+      RES_0:
+          case(data_in)
+              1'b0: next_state = RES_0;
+              1'b1: next_state = RES_1;
+          endcase
+      RES_1:
+          case(data_in)
+              1'b0: next_state = RES_2;
+              1'b1: next_state = RES_0;
+          endcase
+      RES_2:
+          case(data_in)
+              1'b0: next_state = RES_1;
+              1'b1: next_state = RES_2;
+          endcase
+      default: next_state = IDLE;
+  endcase
+end
+ 
+//(3)determine the output according to the current state and input 
+// 只有在状态为RES_0也就是余数为0，即对3整除时，data_out才会拉高
+always @(posedge clk)begin
+  if(!rstn)begin
+    data_out <= 1'b0;
+  end
+  else if((current_state==IDLE && data_in==1'b0)||(current_state==RES_0 && data_in==1'b0)||(current_state==RES_1 && data_in==1'b1))
+    data_out <= 1'b1;
+  else 
+    data_out <= 1'b0;
+end
+ 
+endmodule
+```
 
-* **一句话口诀**：“**复位生效异步（响应快、不依赖时钟），复位撤销同步（过两级 FF，避开 Recovery/Removal 违例）**。”
 
 # 第六部分:高频追问速查
 

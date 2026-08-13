@@ -659,6 +659,32 @@ endmodule
 - **位运算**:最低位 1 的 one-hot = `x & (-x)`;清最低位 1 = `x & (x-1)`。
 - 讲法:"本质是 priority encoder。找最低位从高往低扫,找最高位反着扫;也可用 `x & -x` 取最低位 1 的 one-hot 再编码。"
 
+### 5.7 异步复位，同步释放（Asynchronous Reset, Synchronous Release）
+
+* **为什么不能直接用异步复位？**
+* 异步复位的撤销（Recovery/Removal）是随时发生的。如果撤销时刻刚好撞上时钟上升沿，触发器内部电路无法确定是采样旧值还是复位值，会导致 **亚稳态（Metastability）**。
+
+
+* **电路结构与代码**：
+* 使用两级 D 触发器（2-DFF Synchronizer），复位端接入外部异步复位信号 `rst_n`，输入端接死 `1'b1`。
+
+
+```systemverilog
+// 异步复位，同步释放电路
+always_ff @(posedge clk or negedge async_rst_n) begin
+    if (!async_rst_n) begin
+        sync_rst_n_stage1 <= 1'b0;
+        sync_rst_n        <= 1'b0;
+    end else begin
+        sync_rst_n_stage1 <= 1 meb1;
+        sync_rst_n        <= sync_rst_n_stage1; // 同步释放后的复位信号
+    end
+end
+
+```
+
+
+* **一句话口诀**：“**复位生效异步（响应快、不依赖时钟），复位撤销同步（过两级 FF，避开 Recovery/Removal 违例）**。”
 
 # 第六部分:高频追问速查
 
@@ -692,3 +718,156 @@ endmodule
 | MATLAB 精度怎么对? | 设计定点 Q 格式;RTL 和 MATLAB 定点模型要 bit-exact,定点 vs 浮点算 SQNR/最大误差。 |
 | BERT 加速器做什么? | 加速 Transformer encoder 的矩阵乘(QKᵀ、softmax 加权 V、FFN 线性)+ softmax/layernorm。 |
 | CV 数字怎么来的? | 见 1.2;CPI=周期/指令,500MHz 靠综合 WNS 转正,35% 是基线对比优化后周期,每个都能讲怎么测。 |
+
+---
+
+# 第七部分：查漏补缺——瑞芯微 MAC 调优、QLoRA 部署与二面高频实战
+
+---
+
+## 7.1 【项目扩展】瑞芯微 MAC（乘累加/算力单元）前后端调优实战
+
+> **项目切入场景**：在面向 AI / DSP 的算力阵列（如 NPU / GEMM 引擎）中，MAC（Multiply-Accumulate）单元是**面积、功耗和关键路径时序（PPA）的最核心瓶颈**。
+
+### 1. 前端（RTL / 架构）调优手段：
+
+* **压缩算术树（Wallace Tree / Dadda Tree）**：
+* 普通乘法器是加法链，组合逻辑延迟极长（$O(N)$）。RTL 调优使用 **Wallace / Dadda Tree 压缩结构**，利用 3:2 Compressor（Full Adder）和 2:2 Compressor（Half Adder）将 partial products（部分积）在 $O(\log N)$ 逻辑级数内压缩为两行，最后送给 CLA（超前进位加法器）。
+
+
+* **Booth 编码（Booth-2 / Modified Booth）**：
+* 采用 Booth 算法对乘数进行分组重编码（如 3-bit 窗口 Booth-2），将需要相加的部分积数量直接**减少一半**，大幅降低加法器树的面积与延迟。
+
+
+* **Pipeline 切割（流水线切拍）**：
+* 在 **乘法阵列（Multiplication Array）与 累加器（Accumulator）** 之间，或者在 Wallace Tree 压缩中途插入流水线寄存器（Pipeline Register）。
+* *关键考点*：MAC 切拍会导致 1~2 拍的 **Read-After-Write (RAW) Data Hazard**。例如连续对同一个累加器加值：$Acc_{n} = Acc_{n-1} + (A_n \times B_n)$。
+* *解决方案*：在 RTL 中增加 **Accumulator Bypass / Interleaving（通道交错）**，或者在硬件层实现多通道（Multi-channel/Multi-context）轮流累加，消除流水线停顿（Stall）。
+
+
+
+### 2. 后端（Synthesis / P&R）调优手段：
+
+* **DesignWare 库与 Arithmetic Optimization**：
+* 在 Synopsys Design Compiler 综合时，避免让工具把 MAC 综合成低效的门电路，显式调用或自动映射到 **Synopsys DesignWare 乘法器库（如 DW_mult_seq, DW_mac）**，并开启 `set_dp_smart_generation`（Datapath 智能重构）。
+
+
+* **Clock Gated & Operand Isolation（操作数隔离）**：
+* 在 MAC 输入端加入 **Operand Isolation（操作数隔离 MUX/AND 门）**。当 MAC 处于空闲（Idle）或其输出不被下游采纳时，封锁输入端的数据翻转，防止数据进入乘法树内部引发海量电容充放电，**降低 30% 以上的动态功耗**。
+
+
+* **Retiming（重定时优化）**：
+* 综合/P&R 时开启 **`set_optimize_registers` / Register Retiming**。工具会自动将 MAC 内部和前后流水线寄存器向前或向后跨越组合逻辑推移，平衡乘法树与累加器之间的 Timing Slack，解决 WNS 违例。
+
+
+
+---
+
+## 7.2 【项目扩展】离线部署 QLoRA、剪枝、反量化与降低模型延迟
+
+> **项目切入场景**：在资源受限端侧（如树莓派 5、NPU、Edge AI 芯片）上，部署 3B/7B 等 LLM 模型的核心瓶颈在于 **Memory Bandwidth Limit（内存带宽墙）** 和 **Compute Latency（计算延迟）**。
+
+### 1. QLoRA 与 4-bit 量化 / 反量化（Dequantization）机制：
+
+* **为什么量化能降延迟？**
+* 端侧 LLM 推理（尤其是 Decode 阶段）是典型的 **Memory-Bound（访存受限型）** 任务。参数从 16-bit（FP16）压缩到 4-bit（NF4/INT4），**内存带宽需求直接降低 75%**，从而将瓶颈从“等 DDR 搬权重”转移回“计算”。
+
+
+* **反量化（Dequantization）的时机与延迟**：
+* 权重以 4-bit 形式存放在 DRAM/SRAM 中，计算时在 CPU/NPU 内部的向量寄存器/MAC 阵列前，**实时反量化（On-the-fly Dequantization）** 为 FP16/INT8 再进行点乘。
+* *反量化公式*：$W_{fp16} = \text{Scale} \times W_{int4} + \text{ZeroPoint}$。
+* *硬件/算子调优*：将“反量化 + 矩阵乘（GEMM）”融合写成 **Fused Kernel（融合算子）**，避免反量化后的中间结果写回内存，消除访存开销。
+
+
+
+### 2. 结构化剪枝（Structured Pruning）与硬件友好度：
+
+* **非结构化剪枝 vs 结构化剪枝**：
+* *非结构化剪枝*：随机把权重设为 0。**对硬件极其不友好**，产生稀疏矩阵，导致 GPU/NPU 的 SIMD/Tensor 单元大量等待与分支预测失败，内存访问不连续，**实际延迟反而恶化**。
+* *结构化剪枝*：按 Channel / Head / Layer 整体裁剪（如 N:M 稀疏性，如 2:4 稀疏）。
+
+
+* **2:4 稀疏性（Sparse Tensor Core）**：
+* 连续 4 个权重中恰好有 2 个为 0。硬件直接跳过零值的乘法，**计算吞吐量直接翻倍（2x Speedup）**，且内存只存储非零权重和 2-bit 索引。
+
+
+
+---
+
+## 7.3 【查漏补缺】二面高频补充八股与实战考点
+
+
+---
+
+### 1. 格雷码（Gray Code）与二进制转换（Hand-written Verilog）
+
+#### (a) 二进制转格雷码（Binary to Gray）
+
+* **原理**：$G[i] = B[i] \oplus B[i+1]$（最高位保持不变）。
+* **Verilog 实现**：
+```systemverilog
+assign gray = (bin >> 1) ^ bin;
+
+```
+
+
+
+#### (b) 格雷码转二进制（Gray to Binary）
+
+* **原理**：二进制的最高位等于格雷码最高位，后续每一位是当前格雷码位与前一位已计算出的二进制位的异或（级联 XOR）。
+* **Verilog 实现（可综合）**：
+```systemverilog
+always_comb begin
+    bin[WIDTH-1] = gray[WIDTH-1];
+    for (int i = WIDTH-2; i >= 0; i--) begin
+        bin[i] = bin[i+1] ^ gray[i];
+    end
+end
+
+```
+
+
+
+---
+
+### 2. 门控时钟（Integrated Clock Gating - ICG）与 Glance
+
+* **原理**：为了消除寄存器在不更新数据时的动态功耗，使用 **ICG 单元** 切断时钟。
+* **为什么不能直接用 `clk & en` 门控？**
+* 如果 `en` 信号在 `clk` 为高电平时发生变化（产生毛刺），会导致输出的时钟产生**严重毛刺（Glitch）**，引发后续时序逻辑误动作！
+
+
+* **标准 ICG 单元结构**：
+* 由 **低电平锁存器（Negative-edge Latch） + 与门（AND Gate）** 组成。
+* `en` 信号首先在 `clk` 低电平时被 Latch 锁存住，确保只有当 `clk` 完全处于低电平时，门控开关才切换，从而**输出绝对无毛刺的时钟**。
+
+
+* **设计规范**：在 RTL 中**绝不手写组合逻辑门控制时钟**，而是通过编写带 `if(en)` 条件的 `always_ff`，让综合工具自动插入库里的标准 ICG 单元（如 Synopsys `compile_ultra -gate_clock`）。
+
+---
+
+### 3. 浮点数加法与定点化（Fixed-point Conversion）
+
+* **浮点数加法器的 5 个步骤（面试必背流程）**：
+1. **对阶（Align Exponents）**：对比两个数的阶码（Exponent），将阶码较小的数的尾数（Mantissa）向右移位，使两数阶码看齐（对齐到大阶码）。
+2. **尾数相加/减（Add/Subtract Mantissas）**：根据符号位，对对齐后的尾数进行定点加/减计算。
+3. **结果规格化（Normalize）**：如果尾数溢出则右移并增加阶码；如果最高有效位不是 1，则左移（Left Shift）并减少阶码，保持 $1.xxxx$ 格式。
+4. **舍入（Rounding）**：按 IEEE 754 标准（如 就近舍入 Round to Nearest）处理多余的尾数位。
+5. **溢出检查（Overflow / Underflow Check）**：检查阶码是否超过最大/最小值（NaN / Inf / Denormalized）。
+
+
+
+---
+
+## 7.4 【速查】二面高频追问补充表
+
+| 追问 | 一句话答 |
+| --- | --- |
+| **为什么 MAC 需要 Booth 编码？** | 将乘数分组重编码，直接把**部分积（Partial Products）数量砍半**，大幅降低加法器树的面积与组合延迟。 |
+| **Wallace Tree 是怎么工作的？** | 用 3:2 Compressor（全加器）和 2:2 Compressor 并行压缩部分积，把 $O(N)$ 的加法链延迟降低到 $O(\log N)$。 |
+| **MAC 累加器的 RAW 冲突怎么处理？** | 硬件增加 Accumulator Bypass（前递旁路）或者将多通道计算进行时间交错（Interleaving）。 |
+| **4-bit 权重量化为什么能降端侧延迟？** | 端侧 LLM 是访存受限（Memory-Bound）任务，压缩权重大幅降低 DDR 带宽压力，减少等数据的停顿。 |
+| **非结构化剪枝为什么对硬件不友好？** | 产生不规则稀疏矩阵，导致 SIMD/Tensor 单元大量等待、分支预测失效及内存非连续访问，实际延迟恶化。 |
+| **为什么必须“异步复位，同步释放”？** | 异步复位生效快；同步释放可避免复位信号撤销时撞上时钟沿，从而引发 Recovery/Removal 违例和亚稳态。 |
+| **为什么不能直接用 `assign gated_clk = clk & en`？** | `en` 信号在 `clk` 高电平变化时会引发**时钟毛刺（Glitch）**；必须用带 Low-latch 的标准 ICG Cell。 |
+| **浮点加法器的 5 个步骤？** | **对阶**（小阶向大阶对齐） $\rightarrow$ **尾数加减** $\rightarrow$ **规格化**（移位恢复 $1.x$ 格式） $\rightarrow$ **舍入** $\rightarrow$ **溢出检查**。 |

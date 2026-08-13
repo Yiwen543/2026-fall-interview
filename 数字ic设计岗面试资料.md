@@ -1026,6 +1026,26 @@ assign empty = (counter == 'd0);
 assign full  = (counter == DEPTH);
 endmodule
 ```
+
+## 5.11 仲裁器
+```systemverilog
+module fixed_pri_arb(
+			input [2:0] req;
+			output reg [2:0] grant
+			);
+			
+			
+	always@(*)begin
+		case(1'b1)
+			req[0]:grant = 3'b001;
+			req[1]:grant = 3'b010;
+			req[2]:grant = 3'b100;
+			default: grant = 3'b000;
+		endcase
+	end
+	
+endmodule
+```
 # 第六部分:高频追问速查
 
 | 追问 | 一句话答 |

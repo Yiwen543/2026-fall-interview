@@ -215,6 +215,128 @@ AXI总线共有五个通道写地址通道、写数据通道、写回复通道�
 
 一句话:"round-robin 是公平轮转仲裁,用指针记住上次授权者,每次从它下一个开始找请求,不饿死;硬件用旋转–优先编码–反旋转。我 SPM 里 DMA 和 Noc 就用它。"
 
+
+基于您提供的《NPU Chip Design Spec V1.5》文档，为您整理并提炼出可补充到履历或项目介绍中的 **Coachip（叩持电子）NPU 芯片设计项目内容**。
+
+您可以将以下内容整合到简历的项目经历或面试复习资料中：
+
+---
+
+### 📌 项目名称：基于 TSMC 22nm 的神经网络推理处理器（NPU Chip Design）
+
+#### 1. 项目简介与背景 (Project Overview)
+
+* **芯片定位**：一款专用于深度神经网络推理的边缘端 NPU 芯片，实现了经典 CNN 网络结构（如 LeNet / AlexNet 类架构，支持 MNIST 数字识别与 CIFAR-10 动物识别）的物理落地。
+
+
+* **主要特性**：支持 RGB 3 通道（单通道最高 8-bit）原始图像输入，内部集成反量化（FP16）处理、可配置权重/偏置参数，以及 1Mb 大容量片上 SRAM 缓存。
+
+
+
+#### 2. 芯片整体架构与核心模块 (System Architecture & Sub-modules)
+
+芯片顶层（CHIP_TOP）包含 **10 个核心子模块**，采用了典型的前后端分层与总线互联架构：
+
+* **数据与计算核心 (NPU Core)**：
+
+
+* **`Data_cache`**：处理 IR 图像数据的异步接收与对齐（内部含 **Async FIFO**，解决 50MHz IR 时钟到 NPU 主时钟的跨时钟域问题），并通过 **AXI Master 接口**将配置的网络权重写入片上 SRAM。
+
+
+* **`Cnn_cal` (计算核心)**：CNN 执行引擎，包含 **2 个卷积层（Conv+ReLU+MaxPool）与 3 个全连接层（FC1~FC3）**，支持定点到 **FP16 浮点**的反量化计算。
+
+
+* **`L1_cache`**：包含了 RGB_RAM (1024x24)、POOLING_RAM、FC_RAM 及 WEIGHT_RAM 等多块片上 SRAM 组，实现 **5x5 卷积滑动窗口（Raster 顺序）** 复杂的地址回调控制与 `Max_Result` 识别比较器。
+
+
+
+
+* **总线互联与外设接口 (Interconnect & Bus Bridges)**：
+
+
+* **`SPI2APB`**：将外部 SPI 串行总线指令转为 APB 总线，实现外部对芯片寄存器与 SRAM 的读写配置。
+
+
+* **`APB_config`**：寄存器配置中心，包含 2 组 APB 总线（APB0 用于 PLL/常开时钟域配置，APB1 为主时钟 4 分频，用于 NPU 算法与量化参数配置）。
+
+
+* **`AXI2SRAM` / `APB2SRAM**`：内部 AXI4 / APB 总线到 SRAM 控制器的桥接模块。
+
+
+* **`SRAM_ctrl`**：基于 TSMC 22nm 工艺（0.114 $\mu m^2$ bit cell），采用 **4 片 2048x64 SRAM 并联（组成 256-bit 位宽）并串联扩容至 1Mb**，支持 400MHz 运行与标准 BIST 接口。
+
+
+
+
+* **时钟与复位系统 (Clock & Reset / PMU)**：
+
+
+* **`PLL` 模块**：集成锁相环，支持 1MHz~1200MHz 输入倍频至最高 1200MHz 系统主时钟；配合 `clk_gate` 实现无毛刺时钟门控。
+
+
+* **多时钟域（CDC）架构**：芯片包含 **4 个完全异步的时钟域**（IR 图像输入 ≤50MHz、SPI 时钟 ≤50MHz、APB 总线时钟 ≤50MHz、NPU 主时钟最高 400MHz）。
+
+
+* **复位电路**：采用了异步复位同步释放（`sync_bit`）的硬核生成逻辑，支持软复位（`soft_clr`）。
+
+
+
+
+* **测试与 DFT (Debug & PAD)**：
+
+
+* **`Debug_mux`**：调试复选模块，可将内部 16 种关键时钟、控制及 AXI 握手信号（如 `axim_awvalid`, `axim_wready` 等）复用引出至外部 Pin 脚。
+
+
+
+
+
+---
+
+### 💡 针对数字 IC 前端/后端面试的重点提炼（可背诵亮点）
+
+如果您在面试中介绍这个项目，可以着重突出以下 **4 个硬核技术点**：
+
+1. **复杂数据通路与算法硬件化（Datapath & Address Control）**：
+
+
+* 在 `L1_cache` 处理 5x5 卷积（Stride=1）时，算法需要逐行滑动，需要手写复杂的 **SRAM 读地址回调状态机**（例如：一行 Block 读完后回退 4 行像素点并右进 1 个像素点）。
+
+
+* 全连接层（FC）的权重读取采用了 **512-bit 转 16-bit 读写位宽不等的 FIFO**（深度为 40，阈值设为 8 触发 RAM 读取），确保数据流持续不断流。
+
+
+
+
+2. **跨时钟域与多时钟架构处理（CDC & Reset Strategy）**：
+
+
+* 芯片内部存在 **4 个异步时钟域**。图像数据输入端采用 **Async FIFO** 实现 IR 时钟到 NPU 主时钟域的隔离。
+
+
+* 包含主时钟 MUX 切换逻辑（外部晶振 `ex_clk` 与 PLL 输出 `FOUTPOSTDIV` 切换），在切换前通过 `gate_en` 进行**无毛刺时钟门控（Glitch-free Clock Gating）** 处理。
+
+
+* 系统复位采用典型的**异步复位、同步释放（2-DFF Synchronizer）** 树状分布生成。
+
+
+
+
+3. **标准总线协议与状态机设计 (AXI4 & APB & SPI)**：
+
+
+* 手写了完整的 **AXI4 Master 状态机**（`IDLE` $\rightarrow$ `SEND_ADDR` $\rightarrow$ `WR_DATA` $\rightarrow$ `WAIT_RESP` $\rightarrow$ `NEW_START`），用于将权重参数突发传输（Burst）写入 SRAM。
+
+
+* 设计了 `SPI2APB` 协议转换桥，内部实现串转并移位寄存器，将 SPI 帧解包为 20-bit 地址、32-bit 数据的 APB 读写操作。
+
+
+
+
+4. **存储阵列设计与 PPA 优化 (Memory Architecture)**：
+
+
+* 片上 SRAM 使用 **4 片 2048x64 单口 RAM 拼接成 256-bit 超宽数据总线**，配合 TSMC 22nm 低漏电工艺，在 400MHz 频率下实现了高带宽的数据吞吐与较低的静态功耗。
 ---
 
 # 第三部分:时序与物理实现

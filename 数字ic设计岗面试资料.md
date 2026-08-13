@@ -41,7 +41,53 @@
 
 一句话心态:"数字不是背出来的,是我做出来的——每个都能讲清怎么测、为什么这么设、瓶颈在哪。"
 
+---
 
+### 💡 针对数字 IC 前端/后端面试的重点提炼（可背诵亮点）
+
+如果您在面试中介绍这个项目，可以着重突出以下 **4 个硬核技术点**：
+
+1. **复杂数据通路与算法硬件化（Datapath & Address Control）**：
+
+
+* 在 `L1_cache` 处理 5x5 卷积（Stride=1）时，算法需要逐行滑动，需要手写复杂的 **SRAM 读地址回调状态机**（例如：一行 Block 读完后回退 4 行像素点并右进 1 个像素点）。
+
+
+* 全连接层（FC）的权重读取采用了 **512-bit 转 16-bit 读写位宽不等的 FIFO**（深度为 40，阈值设为 8 触发 RAM 读取），确保数据流持续不断流。
+
+
+
+
+2. **跨时钟域与多时钟架构处理（CDC & Reset Strategy）**：
+
+
+* 芯片内部存在 **4 个异步时钟域**。图像数据输入端采用 **Async FIFO** 实现 IR 时钟到 NPU 主时钟域的隔离。
+
+
+* 包含主时钟 MUX 切换逻辑（外部晶振 `ex_clk` 与 PLL 输出 `FOUTPOSTDIV` 切换），在切换前通过 `gate_en` 进行**无毛刺时钟门控（Glitch-free Clock Gating）** 处理。
+
+
+* 系统复位采用典型的**异步复位、同步释放（2-DFF Synchronizer）** 树状分布生成。
+
+
+
+
+3. **标准总线协议与状态机设计 (AXI4 & APB & SPI)**：
+
+
+* 手写了完整的 **AXI4 Master 状态机**（`IDLE` $\rightarrow$ `SEND_ADDR` $\rightarrow$ `WR_DATA` $\rightarrow$ `WAIT_RESP` $\rightarrow$ `NEW_START`），用于将权重参数突发传输（Burst）写入 SRAM。
+
+
+* 设计了 `SPI2APB` 协议转换桥，内部实现串转并移位寄存器，将 SPI 帧解包为 20-bit 地址、32-bit 数据的 APB 读写操作。
+
+
+
+
+4. **存储阵列设计与 PPA 优化 (Memory Architecture)**：
+
+
+* 片上 SRAM 使用 **4 片 2048x64 单口 RAM 拼接成 256-bit 超宽数据总线**，配合 TSMC 22nm 低漏电工艺，在 400MHz 频率下实现了高带宽的数据吞吐与较低的静态功耗。
+---
 
 ---
 
@@ -1180,55 +1226,3 @@ end
 
 
 * **`Debug_mux`**：调试复选模块，可将内部 16 种关键时钟、控制及 AXI 握手信号（如 `axim_awvalid`, `axim_wready` 等）复用引出至外部 Pin 脚。
-
-
-
-
-
----
-
-### 💡 针对数字 IC 前端/后端面试的重点提炼（可背诵亮点）
-
-如果您在面试中介绍这个项目，可以着重突出以下 **4 个硬核技术点**：
-
-1. **复杂数据通路与算法硬件化（Datapath & Address Control）**：
-
-
-* 在 `L1_cache` 处理 5x5 卷积（Stride=1）时，算法需要逐行滑动，需要手写复杂的 **SRAM 读地址回调状态机**（例如：一行 Block 读完后回退 4 行像素点并右进 1 个像素点）。
-
-
-* 全连接层（FC）的权重读取采用了 **512-bit 转 16-bit 读写位宽不等的 FIFO**（深度为 40，阈值设为 8 触发 RAM 读取），确保数据流持续不断流。
-
-
-
-
-2. **跨时钟域与多时钟架构处理（CDC & Reset Strategy）**：
-
-
-* 芯片内部存在 **4 个异步时钟域**。图像数据输入端采用 **Async FIFO** 实现 IR 时钟到 NPU 主时钟域的隔离。
-
-
-* 包含主时钟 MUX 切换逻辑（外部晶振 `ex_clk` 与 PLL 输出 `FOUTPOSTDIV` 切换），在切换前通过 `gate_en` 进行**无毛刺时钟门控（Glitch-free Clock Gating）** 处理。
-
-
-* 系统复位采用典型的**异步复位、同步释放（2-DFF Synchronizer）** 树状分布生成。
-
-
-
-
-3. **标准总线协议与状态机设计 (AXI4 & APB & SPI)**：
-
-
-* 手写了完整的 **AXI4 Master 状态机**（`IDLE` $\rightarrow$ `SEND_ADDR` $\rightarrow$ `WR_DATA` $\rightarrow$ `WAIT_RESP` $\rightarrow$ `NEW_START`），用于将权重参数突发传输（Burst）写入 SRAM。
-
-
-* 设计了 `SPI2APB` 协议转换桥，内部实现串转并移位寄存器，将 SPI 帧解包为 20-bit 地址、32-bit 数据的 APB 读写操作。
-
-
-
-
-4. **存储阵列设计与 PPA 优化 (Memory Architecture)**：
-
-
-* 片上 SRAM 使用 **4 片 2048x64 单口 RAM 拼接成 256-bit 超宽数据总线**，配合 TSMC 22nm 低漏电工艺，在 400MHz 频率下实现了高带宽的数据吞吐与较低的静态功耗。
----

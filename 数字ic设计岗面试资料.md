@@ -194,6 +194,8 @@
 
 一句话:"AXI 是分通道、基于 VALID/READY 握手的总线;靠 burst 提带宽,靠 ID 支持 outstanding 和乱序返回。"
 
+AXI总线共有五个通道写地址通道、写数据通道、写回复通道、读地址通道、读数据通道；且这些通道都是独立的，采用握手机制进行通信，支持单向传输； 在AXI协议中，基于读写地址通道ID信号实现乱序。对于写操作，不同主机之间的传输事务没有顺序的限制；相同主机之间的不同ID的传输事务，没有顺序限制；相同主机之间的相同ID的传输事务，必须按照书籍发出地址的相同的顺序处理。对于读操作，同一从机的相同ARID必须按照接收的地址顺序返回读数据；不同从机的ARID也必须按照接收的地址顺序范围读数据。 burst突发类型 FIXED:所有数据都使用起始地址进行访问，即是地址固定，比如访问一个fifo； INCR:地址按照数据宽度累加； WRAP：现根据初始地址，计算出最大地址范围与地址边界。当地址小于最大地址时，类型与INCR一致，而超过最大地址时，则绕回到地址边界，循环往复。最大地址计算方式：addr_boudary + (N byteS x busrt_length)；
+
 ## 2.10 JALR 与 Round-Robin
 
 **JALR(Jump And Link Register):**
@@ -878,7 +880,54 @@ end
 endmodule
 ```
 
-
+## 5.10 用移位寄存器实现同步FIFO
+```systemverilog
+module shift_reg_fifo#(
+    parameter DEPTH  = 8    ,
+    parameter DATA_W = 32
+)(
+    input                      clk          ,
+    input                      rstn         ,
+    output                     empty        ,
+    output                     full         ,
+ 
+    input                      push         ,
+    input      [DATA_W-1:0]    push_data    ,
+    input                      pop          ,
+    output reg [DATA_W-1:0]    pop_data    
+);
+reg [DATA_W-1:0] fifo_mem [DEPTH-1:0];
+reg [$clog2(DEPTH)+1:0] counter;
+ 
+always @(posedge clk)begin
+      if(!rstn)
+        pop_data <= 'd;
+      else if(push && pop)begin
+        fifo_mem <= {push_data,fifo_mem[DEPTH-1:1]};
+        pop_data <= fifo_mem[DEPTH-counter];
+      end
+      else if(push)begin
+        fifo_mem <= {push_data,fifo_mem[DEPTH-1:1]};
+      end
+      else if(pop)begin
+        pop_data <= fifo_mem[DEPTH-counter];
+      end
+end
+always @(posedge clk)begin
+    if(!rstn)
+        counter <= 'd0;
+    else if(push && pop)
+        counter <= counter;
+    else if(push)
+        counter <= counter + 1'b1;
+    else if(pop)
+        counter <= counter - 1'b1;
+end
+ 
+assign empty = (counter == 'd0);
+assign full  = (counter == DEPTH);
+endmodule
+```
 # 第六部分:高频追问速查
 
 | 追问 | 一句话答 |

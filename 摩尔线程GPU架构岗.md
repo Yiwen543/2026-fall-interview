@@ -27,7 +27,7 @@
 ### 2. Scoreboard（记分板）
 
 * **核心功能**：追踪正在执行的长/短延迟指令的目标寄存器，**检测并消除 RAW（Read-After-Write）和 WAW 数据冒险**。
-* **硬件机制**：
+* **硬件机制**：硬件机制：位图/表项结构：每个 Warp 维护一组寄存器占用状态表。当指令发射且目标寄存器为 $R_d$ 时，Scoreboard 将 $R_d$ 标记为 Pending（置 1）。RAW 检查：Warp Scheduler 尝试发射新指令时，提取源操作数 $R_s, R_t$，查询 Scoreboard。若任意源寄存器为 Pending，指令被阻塞。清除（Clear/Writeback）：当内存加载返回或长周期计算完成并写回寄存器时，Scoreboard 对应位清零，唤醒等待该寄存器的 Warp。
 * **位图/表项结构**：每个 Warp 维护一组寄存器占用状态表。当指令发射且目标寄存器为 $R_d$ 时，Scoreboard 将 $R_d$ 标记为 Pending（置 1）。
 * **RAW 检查**：Warp Scheduler 尝试发射新指令时，提取源操作数 $R_s, R_t$，查询 Scoreboard。若任意源寄存器为 Pending，指令被阻塞。
 * **清除（Clear/Writeback）**：当内存加载返回或长周期计算完成并写回寄存器时，Scoreboard 对应位清零，唤醒等待该寄存器的 Warp。

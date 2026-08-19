@@ -408,3 +408,157 @@ $$\text{Global HBM3e} \xrightarrow{\text{TMA}} \text{TMEM / SMEM} \xrightarrow{\
 1. **顶层与控制**：GPU 采用两级调度，跨 SM 为 MIMD 异步调度（GigaThread），SM 内为 SIMT 抽象映射到宽 SIMD 流水线；
 2. **指令与寄存器**：通过海量寄存器堆静态切分实现零开销 Warp 切换，利用多 Bank + Operand Collector 解决操作数冲突；
 3. **数据通路演进趋势**：数据流正朝着 **“更少经过通用寄存器、更宽的专用张量存储、更深度的异步硬件卸载”** 发展（从 Ampere 的 Async Copy，到 Hopper 的 TMA 硬件直通，再到 Blackwell 的独立 TMEM 数据通路）。
+
+在现代 GPU 编程中（如 NVIDIA 的 **CUDA** 或摩尔线程的 **MUSA**），编写 GPU Kernel 是基于 **C++ 扩展语法** 实现的。
+
+它的核心模式是：
+
+* **Host（CPU 端代码）**：负责分配显存、拷贝数据、配置线程网格（Grid/Block）并触发计算。
+* **Device（GPU 端 Kernel 函数）**：用 `__global__` 声明的 C++ 函数，由成千上万个标量线程以 **SPMD（单程序多数据）** 范式并发执行。
+
+---
+
+### 一、 核心流程与最小可运行代码（向量加法：$C = A + B$）
+
+将以下代码保存为 `vector_add.cu`（若在摩尔线程 MUSA 环境下，保存为 `.mu` 并将 `cuda` 前缀替换为 `musa`，语法完全一致）：
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <cuda_runtime.h> // 包含 GPU Runtime API
+
+// -------------------------------------------------------------------------
+// 1. GPU Kernel 函数（在 GPU 上以单线程视角运行）
+// -------------------------------------------------------------------------
+// __global__ 关键字告诉编译器：该函数在 GPU 上执行，从 CPU 端调用
+__global__ void vectorAddKernel(const float* A, const float* B, float* C, int n) {
+    // 计算当前线程在整个 Grid 中的全局唯一索引
+    // 线程全局索引 = Block起始偏移 + Block内线程偏移
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // 边界检查：防止数据越界
+    if (idx < n) {
+        C[idx] = A[idx] + B[idx]; // 每个线程只负责计算数组中的 1 个元素
+    }
+}
+
+// -------------------------------------------------------------------------
+// 2. 主机端（CPU）控制代码
+// -------------------------------------------------------------------------
+int main() {
+    const int N = 1 << 20; // 1,048,576 个浮点数
+    const size_t bytes = N * sizeof(float);
+
+    // 步骤 1: 在 CPU (Host) 内存中准备数据
+    std::vector<float> h_A(N, 1.0f);
+    std::vector<float> h_B(N, 2.0f);
+    std::vector<float> h_C(N, 0.0f);
+
+    // 步骤 2: 在 GPU (Device) 显存中分配空间
+    float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    cudaMalloc(&d_A, bytes);
+    cudaMalloc(&d_B, bytes);
+    cudaMalloc(&d_C, bytes);
+
+    // 步骤 3: 将数据从 CPU 内存拷贝到 GPU 显存 (Host to Device)
+    cudaMemcpy(d_A, h_A.data(), bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B.data(), bytes, cudaMemcpyHostToDevice);
+
+    // 步骤 4: 配置执行网格 (Execution Configuration)
+    int threadsPerBlock = 256;                          // 每个 Block 包含 256 个线程（通常为 32 的倍数）
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock; // 向上取整计算需要的 Block 数量
+
+    // 步骤 5: 启动 GPU Kernel (Triple Chevrons <<<Grid, Block>>> 语法)
+    std::cout << "Launching Kernel with " << blocksPerGrid << " blocks and " 
+              << threadsPerBlock << " threads per block...\n";
+    vectorAddKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
+
+    // 步骤 6: 同步并检查 Kernel 执行状态
+    cudaDeviceSynchronize(); // 阻塞 CPU，直到 GPU 执行完毕
+
+    // 步骤 7: 将计算结果从 GPU 拷回 CPU 内存 (Device to Host)
+    cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost);
+
+    // 验证计算结果
+    bool success = true;
+    for (int i = 0; i < 10; ++i) { // 打印前 10 个结果
+        std::cout << "h_C[" << i << "] = " << h_C[i] << "\n";
+        if (h_C[i] != 3.0f) success = false;
+    }
+    std::cout << (success ? "PASSED!" : "FAILED!") << "\n";
+
+    // 步骤 8: 释放 GPU 显存
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+
+    return 0;
+}
+
+```
+
+---
+
+### 二、 编写 GPU Kernel 必须掌握的 4 个核心语法点
+
+#### 1. 函数执行空间限定符 (Execution Space Qualifiers)
+
+* **`__global__`**：GPU 上的 Kernel 入口函数，由 CPU 调用、GPU 执行，返回类型必须为 `void`。
+* **`__device__`**：GPU 内部的辅助函数，由 GPU 上的其他函数调用、GPU 执行。
+* **`__host__`**：普通 CPU 函数（默认不加时即为 `__host__`）。
+
+#### 2. 线程层次内置变量 (Built-in Variables)
+
+GPU 硬件会将你的任务组织为 **Grid（网格） $\to$ Block（线程块） $\to$ Thread（线程）**。在 Kernel 内部，每个线程可以通过以下内置结构体获取自己的硬件位置：
+
+* `threadIdx`：当前线程在其所在 Block 内的坐标（`.x`, `.y`, `.z`）。
+* `blockIdx`：当前 Block 在整个 Grid 内的坐标（`.x`, `.y`, `.z`）。
+* `blockDim`：一个 Block 的维度与大小（包含多少线程）。
+* `gridDim`：整个 Grid 的维度与大小（包含多少 Block）。
+
+```cpp
+// 1D 线性数组的标准定位公式：
+int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+// 2D 图像/矩阵的标准定位公式：
+int col = blockIdx.x * blockDim.x + threadIdx.x;
+int row = blockIdx.y * blockDim.y + threadIdx.y;
+int idx2D = row * width + col;
+
+```
+
+#### 3. 启动配置语法 `<<<Grid, Block, SharedMem, Stream>>>`
+
+这是 C++ 的扩展操作符，用来告诉 GPU 的 **GigaThread / 任务调度器** 如何切分硬件资源：
+
+* **第 1 个参数（Grid 维度）**：分配多少个 Thread Block。
+* **第 2 个参数（Block 维度）**：每个 Block 分配多少个 Thread（通常选 128、256、512，必须为 Warp 大小 32 的整数倍）。
+* **第 3 个参数（可选）**：动态申请的 Shared Memory 字节数。
+* **第 4 个参数（可选）**：指定的异步 CUDA Stream。
+
+---
+
+### 三、 编译与运行
+
+#### 1. 如果在 NVIDIA 环境下：
+
+使用 `nvcc` 编译器编译：
+
+```bash
+nvcc -O3 vector_add.cu -o vector_add
+./vector_add
+
+```
+
+#### 2. 如果在摩尔线程（MUSA）环境下：
+
+摩尔线程提供了高度兼容 CUDA 的工具链 **MCC (Moore Threads CUDA Compiler / musacc)**：
+
+```bash
+# 代码后缀通常为 .mu
+mcc -O3 vector_add.mu -o vector_add
+./vector_add
+
+```
+
+*(在 MUSA 中，API 仅需将 `cudaMalloc` 对应替换为 `musaMalloc`，Kernel 本身的 C++ 计算逻辑和索引推导完全相同。)*
